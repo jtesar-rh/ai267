@@ -1,11 +1,9 @@
 from kfp import dsl, compiler
-from kfp.dsl import Input, Output, Dataset, Artifact, Model
+from kfp.dsl import Input, Output, Dataset, Model
 
 DSI = 'quay.io/modh/cuda-notebooks:cuda-jupyter-tensorflow-ubi9-python-3.11-20250213-b23e7ed'
 
-@dsl.component(
-        base_image=DSI
-        )
+@dsl.component( base_image=DSI)
 def gather_data(data: Output[Dataset]):
     import pandas as pd
     import os
@@ -23,7 +21,6 @@ def gather_data(data: Output[Dataset]):
 
     objects = s3.list_objects_v2(Bucket='bostonhousing')
 
-# output the name of each object within the bucket
     for obj in objects["Contents"]:
         print(obj["Key"])
         s3.download_file('bostonhousing', obj["Key"], obj["Key"], )
@@ -31,9 +28,9 @@ def gather_data(data: Output[Dataset]):
         ds = pd.read_csv('boston_housing.csv')
         ds.to_csv(data.path)
 
-@dsl.component(
-        base_image=DSI
-        )
+
+
+@dsl.component( base_image=DSI)
 def clean_data(data_in: Input[Dataset], data_out: Output[Dataset]):
     import pandas as pd
     df = pd.read_csv(data_in.path)
@@ -41,9 +38,9 @@ def clean_data(data_in: Input[Dataset], data_out: Output[Dataset]):
     df.drop(nhdi)
     df.to_csv(data_out.path)
 
-@dsl.component(
-        base_image=DSI
-        )
+
+
+@dsl.component( base_image=DSI)
 def train(data: Input[Dataset], model_out: Output[Model]):
     import pandas as pd
     import tensorflow as tf
@@ -62,9 +59,7 @@ def train(data: Input[Dataset], model_out: Output[Model]):
     model_out.uri = model_out.uri + '.keras'
     model.save(model_out.path)
 
-@dsl.component(
-        base_image=DSI
-        )
+@dsl.component( base_image=DSI)
 def infer(model_in: Input[Model]):
     import numpy as np
     import tensorflow as tf
@@ -78,13 +73,12 @@ def infer(model_in: Input[Model]):
     print(y)
 
 
-@dsl.pipeline(name='boston')
+@dsl.pipeline(name='boston-housing')
 def boston_pipeline():
    task1 = gather_data()
    task2 = clean_data(data_in = task1.outputs['data'])
    task3 = train(data = task2.outputs['data_out'])
    infer(model_in = task3.outputs['model_out'])
-
 
 
 compiler.Compiler().compile(boston_pipeline, "pipeline.yaml")    
