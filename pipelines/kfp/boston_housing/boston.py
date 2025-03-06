@@ -1,5 +1,5 @@
 from kfp import dsl, compiler
-from kfp.dsl import Input, Output, Dataset, Model
+from kfp.dsl import Input, Output, Dataset, Model, importer
 
 DSI = 'quay.io/modh/cuda-notebooks:cuda-jupyter-tensorflow-ubi9-python-3.11-20250213-b23e7ed'
 
@@ -36,8 +36,11 @@ def clean_data(data_in: Input[Dataset], data_out: Output[Dataset]):
     df = pd.read_csv(data_in.path)
     nhdi = df[(df['PRICE'] > 45) | (df['RM'] < 4)].index
     df.drop(nhdi)
+    print('---------------------- DATA -------------------------')
+    print(data_out.uri)
+    print(data_out.path)
+    print('---------------------- END DATA -------------------------')
     df.to_csv(data_out.path)
-
 
 
 @dsl.component( base_image=DSI)
@@ -75,8 +78,10 @@ def infer(model_in: Input[Model]):
 
 @dsl.pipeline(name='boston-housing')
 def boston_pipeline():
-   task1 = gather_data()
-   task2 = clean_data(data_in = task1.outputs['data'])
+  
+   importer1 = importer(artifact_uri='s3://pipbucket/data/boston_housing.csv',artifact_class=Dataset,reimport=False)    
+   #task1 = gather_data()
+   task2 = clean_data(data_in = importer1.output)
    task3 = train(data = task2.outputs['data_out'])
    infer(model_in = task3.outputs['model_out'])
 
