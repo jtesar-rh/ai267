@@ -1,27 +1,31 @@
 from kfp import dsl, compiler
-from kfp.dsl import Input, Output, Dataset, Model
+from kfp.dsl import Input, Output, Dataset, Model, importer
 
 DSI = 'registry.access.redhat.com/ubi9/python-39'
 
-@dsl.component(base_image=DSI,packages_to_install=["tensorflow==2.15.1","dill","joblib"])
+@dsl.component(base_image=DSI,packages_to_install=["tensorflow==2.15.1","dill"])
 def get_training_data(train_images: Output[Dataset],
                       train_labels: Output[Dataset],
                       test_images: Output[Dataset], 
                       test_labels: Output[Dataset]):
     import numpy as np
     import tensorflow as tf
-    import joblib
     
     mnist = tf.keras.datasets.mnist
     (tr_i, tr_l), (t_i, t_l) = mnist.load_data()
 
+    train_images.uri += '.npy'
+    train_labels.uri += '.npy'
+    test_images.uri +=  '.npy'
+    test_labels.uri +=  '.npy'
+
     tr_i = tr_i / 255.0
     t_i = t_i / 255.0
 
-    joblib.dump(tr_i,filename=train_images.path)
-    joblib.dump(tr_l,train_labels.path)
-    joblib.dump(t_i,test_images.path)
-    joblib.dump(t_l,test_labels.path)
+    np.save(train_images.path,tr_i)
+    np.save(train_labels.path,tr_l)
+    np.save(test_images.path,t_i)
+    np.save(test_labels.path,t_l)
 
 
 @dsl.component(base_image=DSI,packages_to_install=["tensorflow==2.15.1","dill"])
@@ -38,18 +42,17 @@ def define_model(model_out: Output[Model]):
     model_out.uri = model_out.uri + ".keras"
     model.save(model_out.path)
 
-@dsl.component(base_image=DSI,packages_to_install=["tensorflow==2.15.1","dill","joblib"])
+@dsl.component(base_image=DSI,packages_to_install=["tensorflow==2.15.1","dill"])
 def train_model(train_images_in: Input[Dataset],
                 train_labels_in: Input[Dataset],
                 model_in: Input[Model],
                 model_out: Output[Model]):
     import numpy as np
     import tensorflow as tf
-    import joblib
 
 
-    train_images = joblib.load(train_images_in.path)
-    train_labels = joblib.load(train_labels_in.path)
+    train_images = np.load(train_images_in.path)
+    train_labels = np.load(train_labels_in.path)
     model = tf.keras.models.load_model(model_in.path)
 
 
@@ -64,8 +67,8 @@ def evaluate_model(test_images_in: Input[Dataset],
     import numpy as np
     import tensorflow as tf
 
-    test_images = joblib.load(test_images_in.path)
-    test_labels = joblib.load(test_labels_in.path)
+    test_images = np.load(test_images_in.path)
+    test_labels = np.load(test_labels_in.path)
     model = tf.keras.models.load_model(model_in.path)
 
     loss, acc = model.evaluate(test_images,  test_labels, verbose=2)
@@ -107,6 +110,23 @@ def restart_model_server():
 
 @dsl.pipeline(name='Numbers')
 def numbers(model_version: str):
+   #train_images = importer(artifact_uri="s3://numbers/data/train_images.npy",
+   #                        artifact_class=Dataset,
+   #                        reimport=False)
+
+   #train_labels = importer(artifact_uri="s3://numbers/data/train_labels.npy",
+   #                        artifact_class=Dataset,
+   #                        reimport=False)
+
+   #test_images = importer(artifact_uri="s3://numbers/data/test_images.npy",
+   #                        artifact_class=Dataset,
+   #                        reimport=False)
+
+   #test_labels = importer(artifact_uri="s3://numbers/data/test_labels.npy",
+   #                        artifact_class=Dataset,
+   #                        reimport=False)
+
+
    train_data = get_training_data()
    model = define_model()
 
