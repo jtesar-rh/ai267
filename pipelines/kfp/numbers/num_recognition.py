@@ -1,9 +1,9 @@
 from kfp import dsl, compiler
 from kfp.dsl import Input, Output, Dataset, Model
 
-DSI = 'quay.io/modh/cuda-notebooks:cuda-jupyter-tensorflow-ubi9-python-3.11-20250213-b23e7ed'
+DSI = 'registry.access.redhat.com/ubi9/python-39'
 
-@dsl.component(base_image=DSI)
+@dsl.component(base_image=DSI,packages_to_install=["tensorflow==2.15.1","dill","joblib"])
 def get_training_data(train_images: Output[Dataset],
                       train_labels: Output[Dataset],
                       test_images: Output[Dataset], 
@@ -24,21 +24,21 @@ def get_training_data(train_images: Output[Dataset],
     joblib.dump(t_l,test_labels.path)
 
 
-@dsl.component(base_image=DSI)
+@dsl.component(base_image=DSI,packages_to_install=["tensorflow==2.15.1","dill"])
 def define_model(model_out: Output[Model]):
-    import joblib
     import tensorflow as tf
+    
+    model = tf.keras.models.Sequential([
+    tf.keras.layers.Flatten(input_shape=(28, 28),name='bitmap'),
+    tf.keras.layers.Dense(128, activation='relu'),
+    tf.keras.layers.Dropout(0.2),
+    tf.keras.layers.Dense(10,activation='softmax')])    
 
-    model = tf.keras.Sequential()
-    model.add(tf.keras.layers.Flatten(input_shape=(28,28)))
-    model.add(tf.keras.layers.Dense(50,activation='relu'))
-    model.add(tf.keras.layers.Dense(50,activation='relu'))
-    model.add(tf.keras.layers.Dense(10,activation='softmax'))
-    model.summary()
     model.compile(optimizer=tf.keras.optimizers.Adam(),loss=tf.keras.losses.SparseCategoricalCrossentropy(from_logits=True),metrics=['accuracy'])
-    joblib.dump(model,model_out.path)
+    model_out.uri = model_out.uri + ".keras"
+    model.save(model_out.path)
 
-@dsl.component(base_image=DSI)
+@dsl.component(base_image=DSI,packages_to_install=["tensorflow==2.15.1","dill","joblib"])
 def train_model(train_images_in: Input[Dataset],
                 train_labels_in: Input[Dataset],
                 model_in: Input[Model],
@@ -50,54 +50,78 @@ def train_model(train_images_in: Input[Dataset],
 
     train_images = joblib.load(train_images_in.path)
     train_labels = joblib.load(train_labels_in.path)
-    model = joblib.load(model_in.path)
+    model = tf.keras.models.load_model(model_in.path)
 
 
-    history = model.fit(train_images, train_labels, epochs=2,batch_size=12000,verbose=1) 
-    joblib.dump(model,model_out.path)
+    history = model.fit(train_images, train_labels, epochs=5,batch_size=1000,verbose=1) 
+    model_out.uri = model_out.uri + '.keras'
+    model.save(model_out.path)
 
-@dsl.component(base_image=DSI)
+@dsl.component(base_image=DSI,packages_to_install=["tensorflow==2.15.1","dill"])
 def evaluate_model(test_images_in: Input[Dataset], 
                    test_labels_in: Input[Dataset],
                    model_in: Input[Model]) -> float:
     import numpy as np
     import tensorflow as tf
-    import joblib
 
     test_images = joblib.load(test_images_in.path)
     test_labels = joblib.load(test_labels_in.path)
-    model = joblib.load(model_in.path)
+    model = tf.keras.models.load_model(model_in.path)
 
     loss, acc = model.evaluate(test_images,  test_labels, verbose=2)
     print('Accuracy:',str(acc))
     return acc
 
 
-@dsl.component(base_image=DSI)
-def init_acc() -> float:
-    return 0.0
+@dsl.component(base_image="registry.access.redhat.com/ubi9/python-39",packages_to_install=["tensorflow==2.15.1","boto3","tf2onnx==1.16.1","dill"])
+def deploy_model(model_in: Input[Model],version: str) -> bool:
+    import numpy as np
+    import tensorflow as tf
+    import boto3
+    import tf2onnx
+    import onnx
+
+    model = tf.keras.models.load_model(model_in.path)
+
+    input_signature = [tf.TensorSpec(model.inputs[0].shape, tf.float64, name='bitmap')]
+    #model.outputs[0].name = 'probabilities'
+
+    onnx_model, _ = tf2onnx.convert.from_keras(model, input_signature, opset=13)
+    onnx.save(onnx_model, "model.onnx")
+
+    s3 = boto3.client("s3",
+                      "us-east-1",
+                      aws_access_key_id="minio",
+                      aws_secret_access_key="minio123",
+                      endpoint_url="https://minio-api-minio.apps.ocp4.example.com",
+                      use_ssl=True)
+    s3_path = "/deploy/numbers/" + version + "/model.onnx"
+    s3.upload_file("model.onnx","numbers",s3_path)
+    return True
+
+@dsl.component(base_image="quay.io/openshift-release-dev/ocp-v4.0-art-dev@sha256:f692e2703b699f7d23e4085599d80b8db1a57196d9a3b6a5a12bdeec493d2a63")
+def restart_model_server():
+    import os
+    os.system('oc whoami')
+    os.system('oc rollout restart deployment/modelmesh-serving-numbers')
 
 @dsl.pipeline(name='Numbers')
-def numbers():
+def numbers(model_version: str):
    train_data = get_training_data()
    model = define_model()
 
-   acc = init_acc().output
-   with dsl.ParallelFor(
-        items=[1,2,3,4,5,6,7,8,9,10],
-        parallelism=1
-   ) as epochs:
-       with dsl.If(acc < 0.9):
-         model = train_model(train_images_in=train_data.outputs['train_images'],
-                             train_labels_in=train_data.outputs['train_labels'],
-                             model_in=model.outputs['model_out'])
+   model = train_model(train_images_in=train_data.outputs['train_images'],
+                       train_labels_in=train_data.outputs['train_labels'],
+                       model_in=model.outputs['model_out'])
 
-         evaluation = evaluate_model(test_images_in=train_data.outputs['test_images'],
-                                     test_labels_in=train_data.outputs['test_labels'],
-                                     model_in = model.outputs['model_out'])
-         acc = evaluation.output
-         model = model.outputs['model_out']
+   #evaluation = evaluate_model(test_images_in=train_data.outputs['test_images'],
+   #                            test_labels_in=train_data.outputs['test_labels'],
+   #                            model_in = model.outputs['model_out'])
         
+   model_deployed = deploy_model(model_in = model.outputs['model_out'],version = model_version)
+   with dsl.If(model_deployed.output == True):
+       restart = restart_model_server()
+       restart.set_caching_options(False)
 
 
 
