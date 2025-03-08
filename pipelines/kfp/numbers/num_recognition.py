@@ -56,7 +56,7 @@ def train_model(train_images_in: Input[Dataset],
     model = tf.keras.models.load_model(model_in.path)
 
 
-    history = model.fit(train_images, train_labels, epochs=5,batch_size=1000,verbose=1) 
+    history = model.fit(train_images, train_labels, epochs=10,batch_size=1000,verbose=1) 
     model_out.uri = model_out.uri + '.keras'
     model.save(model_out.path)
 
@@ -87,7 +87,6 @@ def deploy_model(model_in: Input[Model],version: str) -> bool:
     model = tf.keras.models.load_model(model_in.path)
 
     input_signature = [tf.TensorSpec(model.inputs[0].shape, tf.float64, name='bitmap')]
-    #model.outputs[0].name = 'probabilities'
 
     onnx_model, _ = tf2onnx.convert.from_keras(model, input_signature, opset=13)
     onnx.save(onnx_model, "model.onnx")
@@ -110,22 +109,6 @@ def restart_model_server():
 
 @dsl.pipeline(name='Numbers')
 def numbers(model_version: str):
-   #train_images = importer(artifact_uri="s3://numbers/data/train_images.npy",
-   #                        artifact_class=Dataset,
-   #                        reimport=False)
-
-   #train_labels = importer(artifact_uri="s3://numbers/data/train_labels.npy",
-   #                        artifact_class=Dataset,
-   #                        reimport=False)
-
-   #test_images = importer(artifact_uri="s3://numbers/data/test_images.npy",
-   #                        artifact_class=Dataset,
-   #                        reimport=False)
-
-   #test_labels = importer(artifact_uri="s3://numbers/data/test_labels.npy",
-   #                        artifact_class=Dataset,
-   #                        reimport=False)
-
 
    train_data = get_training_data()
    model = define_model()
@@ -134,14 +117,13 @@ def numbers(model_version: str):
                        train_labels_in=train_data.outputs['train_labels'],
                        model_in=model.outputs['model_out'])
 
-   #evaluation = evaluate_model(test_images_in=train_data.outputs['test_images'],
-   #                            test_labels_in=train_data.outputs['test_labels'],
-   #                            model_in = model.outputs['model_out'])
-        
-   model_deployed = deploy_model(model_in = model.outputs['model_out'],version = model_version)
-   with dsl.If(model_deployed.output == True):
-       restart = restart_model_server()
-       restart.set_caching_options(False)
+   evaluation = evaluate_model(test_images_in=train_data.outputs['test_images'],
+                               test_labels_in=train_data.outputs['test_labels'],
+                               model_in = model.outputs['model_out'])
+   with dsl.If(evaluation.output > 0.95):    
+     model_deployed = deploy_model(model_in = model.outputs['model_out'],version = model_version)
+     with dsl.If(model_deployed.output == True):
+        restart_model_server().set_caching_options(False)
 
 
 
