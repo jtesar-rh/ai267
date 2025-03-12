@@ -77,12 +77,17 @@ def evaluate_model(test_images_in: Input[Dataset],
 
 
 @dsl.component(base_image="registry.access.redhat.com/ubi9/python-39",packages_to_install=["tensorflow==2.15.1","boto3","tf2onnx==1.16.1","dill"])
-def deploy_model(model_in: Input[Model],version: str) -> bool:
+def deploy_model(model_in: Input[Model],
+                 model_name: str,
+                 version: str,
+                 s3_bucket_in: str,
+                 s3_path_in: str) -> bool:
     import numpy as np
     import tensorflow as tf
     import boto3
     import tf2onnx
     import onnx
+    import os
 
     model = tf.keras.models.load_model(model_in.path)
 
@@ -97,18 +102,30 @@ def deploy_model(model_in: Input[Model],version: str) -> bool:
                       aws_secret_access_key="minio123",
                       endpoint_url="https://minio-api-minio.apps.ocp4.example.com",
                       use_ssl=True)
-    s3_path = "/deploy/numbers/" + version + "/model.onnx"
-    s3.upload_file("model.onnx","numbers",s3_path)
+    s3_path = s3_path_in + '/'+ version + '/' + model_name
+    try:
+      s3.upload_file("model.onnx",s3_bucket_in,s3_path)
+    except ClientError as e:
+      print(e)
+      return False
+    print('Model uploaded')
     return True
 
 @dsl.component(base_image="quay.io/openshift-release-dev/ocp-v4.0-art-dev@sha256:f692e2703b699f7d23e4085599d80b8db1a57196d9a3b6a5a12bdeec493d2a63")
-def restart_model_server():
+def restart_model_server(serving_ns: str, serving_deployment_name: str):
     import os
     os.system('oc whoami')
-    os.system('oc rollout restart deployment/modelmesh-serving-numbers')
+    cmd = 'oc rollout restart deployment/' + serving_deployment_name + ' -n ' + serving_ns
+    print(cmd)
+    os.system(cmd)
 
 @dsl.pipeline(name='Numbers')
-def numbers(model_version: str):
+def numbers(model_name: str = 'model.onnx',
+            model_version: str = '1', 
+            s3_bucket: str = 'deploy',
+            s3_path: str = '/models/numbers',
+            serving_ns: str = 'model-serving',
+            serving_deployment_name: str = 'modelmesh-serving-numbers'):
 
    train_data = get_training_data()
    model = define_model()
@@ -120,10 +137,15 @@ def numbers(model_version: str):
    evaluation = evaluate_model(test_images_in=train_data.outputs['test_images'],
                                test_labels_in=train_data.outputs['test_labels'],
                                model_in = model.outputs['model_out'])
-   with dsl.If(evaluation.output > 0.95):    
-     model_deployed = deploy_model(model_in = model.outputs['model_out'],version = model_version)
-     with dsl.If(model_deployed.output == True):
-        restart_model_server().set_caching_options(False)
+   with dsl.If(evaluation.output >= 0.95,"is accuracy >= 95"):    
+     model_deployed = deploy_model(model_in = model.outputs['model_out'],
+                                   model_name = model_name,
+                                   version = model_version,
+                                   s3_bucket_in = s3_bucket,
+                                   s3_path_in = s3_path)
+     with dsl.If(model_deployed.output == True,"Was model succesfully deplyed"):
+        restart_model_server(serving_ns=serving_ns,
+                             serving_deployment_name=serving_deployment_name).set_caching_options(False)
 
 
 
